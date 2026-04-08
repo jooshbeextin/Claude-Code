@@ -54,18 +54,20 @@ businesses:
     stage: "development"  # concept | design | development | beta | pre-launch | live
 
 # ─────────────────────────────────────────────────────────────
-# Email Delivery (optional — leave blank to skip)
+# Telegram Delivery (optional — leave blank to skip)
 # ─────────────────────────────────────────────────────────────
-# To enable email:
-#   1. Use a Gmail account.
-#   2. Enable 2-Step Verification on your Google account.
-#   3. Go to: myaccount.google.com → Security → App Passwords
-#   4. Create an App Password for "Mail"
-#   5. Copy the 16-character password into .env as GMAIL_APP_PASSWORD
+# To enable Telegram:
+#   1. Open Telegram → search for @BotFather → send /newbot
+#   2. Give your bot a name (e.g. "Josh Executive Report") and a username
+#   3. BotFather will give you a token — add it to .env as TELEGRAM_BOT_TOKEN
+#   4. Start a chat with your new bot (search it, press Start)
+#   5. Visit in browser:
+#        https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
+#      Look for "chat": {"id": 123456789} — that number is your TELEGRAM_CHAT_ID
+#   6. Add TELEGRAM_CHAT_ID to .env
 #
-email:
-  sender_email: ""       # your-gmail@gmail.com
-  recipient_email: ""    # where the report should be delivered (can be same address)
+telegram:
+  enabled: true
 
 # ─────────────────────────────────────────────────────────────
 # Report Preferences

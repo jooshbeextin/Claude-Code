@@ -6,11 +6,10 @@ Businesses: Castient | Ten Four Pictures | Video Production Directory
 
 import os
 import json
-import smtplib
 import sys
+import urllib.request
+import urllib.parse
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from pathlib import Path
 
 import anthropic
@@ -248,7 +247,7 @@ def generate_report(date: str, castient: dict, tenfour: dict, directory: dict,
 
 
 # ─────────────────────────────────────────────────────────────
-# Save & Email
+# Save & Telegram
 # ─────────────────────────────────────────────────────────────
 
 def save_report(report: str, date_slug: str) -> str:
@@ -260,46 +259,55 @@ def save_report(report: str, date_slug: str) -> str:
     return str(filepath)
 
 
-def send_email(report: str, subject: str, config: dict) -> bool:
-    """Send report via Gmail SMTP (free). Requires GMAIL_APP_PASSWORD in .env"""
-    email_cfg = config.get("email", {})
-    sender    = email_cfg.get("sender_email", "")
-    recipient = email_cfg.get("recipient_email", "")
-    password  = os.environ.get("GMAIL_APP_PASSWORD", "")
+def _tg_post(token: str, chat_id: str, text: str) -> None:
+    """Send a single Telegram message (max 4096 chars)."""
+    url  = f"https://api.telegram.org/bot{token}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id":    chat_id,
+        "text":       text,
+        "parse_mode": "HTML",
+    }).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"Telegram API returned {resp.status}")
 
-    if not all([sender, recipient, password]):
+
+def send_telegram(report: str) -> bool:
+    """Send the report to Telegram. Splits into chunks if > 4096 chars."""
+    token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+    if not token or not chat_id:
         return False
 
+    # Wrap in <pre> for monospace rendering; split into 4000-char chunks
+    wrapped   = f"<pre>{report}</pre>"
+    chunk_max = 4000
+
+    if len(wrapped) <= chunk_max:
+        chunks = [wrapped]
+    else:
+        # Split on newlines, keeping chunks under the limit
+        lines  = report.split("\n")
+        chunks = []
+        buf    = ""
+        for line in lines:
+            candidate = buf + line + "\n"
+            if len(f"<pre>{candidate}</pre>") > chunk_max and buf:
+                chunks.append(f"<pre>{buf.rstrip()}</pre>")
+                buf = line + "\n"
+            else:
+                buf = candidate
+        if buf.strip():
+            chunks.append(f"<pre>{buf.rstrip()}</pre>")
+
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"]    = sender
-        msg["To"]      = recipient
-
-        # Plain text
-        msg.attach(MIMEText(report, "plain"))
-
-        # Dark-themed HTML
-        html = f"""<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="margin:0;padding:0;background:#0f0f0f;">
-  <div style="font-family:'Courier New',Courier,monospace;font-size:13px;
-              line-height:1.7;color:#d4d4d4;max-width:680px;margin:0 auto;
-              padding:32px 24px;background:#0f0f0f;">
-    <pre style="white-space:pre-wrap;word-break:break-word;margin:0;">{report}</pre>
-  </div>
-</body>
-</html>"""
-        msg.attach(MIMEText(html, "html"))
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender, password)
-            server.sendmail(sender, recipient, msg.as_string())
-
+        for chunk in chunks:
+            _tg_post(token, chat_id, chunk)
         return True
     except Exception as e:
-        print(f"\n  ⚠  Email failed: {e}")
+        print(f"\n  ⚠  Telegram failed: {e}")
         return False
 
 
@@ -341,15 +349,13 @@ def main():
 
     # Save to file
     saved = save_report(report, slug)
-    print(f"\n  Saved  →  {saved}")
+    print(f"\n  Saved    →  {saved}")
 
-    # Email
-    subject = f"Executive Report — {date}"
-    if send_email(report, subject, config):
-        recipient = config.get("email", {}).get("recipient_email", "")
-        print(f"  Emailed →  {recipient}")
+    # Telegram
+    if send_telegram(report):
+        print("  Telegram →  sent")
     else:
-        print("  Email  →  not configured (see .env and config.yaml)")
+        print("  Telegram →  not configured (add TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to .env)")
 
     print(f"\n{hr('═')}\n")
 
