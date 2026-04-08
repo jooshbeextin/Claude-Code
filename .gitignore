@@ -1,0 +1,21 @@
+# Environment variables — never commit these
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Generated reports (local only)
+reports/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

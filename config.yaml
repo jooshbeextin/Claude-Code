@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────────────────────
+# Daily Executive Report — Configuration
+# ─────────────────────────────────────────────────────────────
+# Edit this file to update your business context and email settings.
+# Sensitive credentials (API keys, passwords) go in .env — NOT here.
+# ─────────────────────────────────────────────────────────────
+
+founder:
+  name: "Josh"
+
+# ─────────────────────────────────────────────────────────────
+# Your Businesses (used for Claude context — keep these current)
+# ─────────────────────────────────────────────────────────────
+businesses:
+  castient:
+    name: "Castient"
+    url: "castient.com"
+    model: "retainer / recurring revenue"
+    description: >
+      B2B content & podcast production company. Transforms internal business insights
+      into podcast-style narrative content for demand generation and sales enablement.
+      Packages category trends and insights as stories that spread across organizations.
+      Deliverables: full episode production + up to 8 cutdowns per episode formatted
+      for Slack, Teams, decks, and sales collateral.
+    target_clients:
+      - "Enterprise SaaS companies"
+      - "CPG (Consumer Packaged Goods) brands"
+      - "C-suite executives at large organizations"
+    stage: "active"  # active | pre-launch | scaling | paused
+
+  tenfour:
+    name: "Ten Four Pictures"
+    url: "tenfour.pictures"
+    model: "project-based ($5k–$25k+ per project)"
+    description: >
+      Boutique full-service video production company based in Toronto, Canada.
+      Tagline: "Handcrafted Moving Images." Produces branded content, commercials,
+      music videos, documentaries, live events, animation, and post-production.
+      In-house crew, gear, and end-to-end capability. Founded 2020.
+    target_clients:
+      - "CPG and B2C brands"
+      - "NGOs and non-profits"
+      - "Music industry clients"
+      - "Healthcare and professional services"
+    stage: "active"
+
+  directory:
+    name: "Video Production Directory"
+    url: "TBD"
+    model: "marketplace / directory SaaS"
+    description: >
+      New digital product in development. A directory website for the video production
+      industry connecting clients with production companies and crew. Launch pending.
+    stage: "development"  # concept | design | development | beta | pre-launch | live
+
+# ─────────────────────────────────────────────────────────────
+# Email Delivery (optional — leave blank to skip)
+# ─────────────────────────────────────────────────────────────
+# To enable email:
+#   1. Use a Gmail account.
+#   2. Enable 2-Step Verification on your Google account.
+#   3. Go to: myaccount.google.com → Security → App Passwords
+#   4. Create an App Password for "Mail"
+#   5. Copy the 16-character password into .env as GMAIL_APP_PASSWORD
+#
+email:
+  sender_email: ""       # your-gmail@gmail.com
+  recipient_email: ""    # where the report should be delivered (can be same address)
+
+# ─────────────────────────────────────────────────────────────
+# Report Preferences
+# ─────────────────────────────────────────────────────────────
+report:
+  model: "claude-opus-4-6"       # Claude model to use for generation
+  save_locally: true              # Save a dated .md file in ./reports/
+  reports_directory: "reports"   # Directory for saved reports
