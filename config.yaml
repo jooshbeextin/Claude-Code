@@ -76,3 +76,56 @@ report:
   model: "claude-opus-4-6"       # Claude model to use for generation
   save_locally: true              # Save a dated .md file in ./reports/
   reports_directory: "reports"   # Directory for saved reports
+
+# ─────────────────────────────────────────────────────────────
+# Film Gig Hunter — Automated NYC + Toronto Booking
+# ─────────────────────────────────────────────────────────────
+# Run:  python film_gig_hunter.py
+# Cron: */30 * * * *  (every 30 min — recommended)
+#       0 8,12,17 * * *  (3x daily — quieter)
+# ─────────────────────────────────────────────────────────────
+film_gigs:
+  enabled: true
+
+  # Markets to monitor — remove either to disable that region
+  markets:
+    - "NYC"
+    - "Toronto"
+
+  # Only alert on gigs scoring this or higher (1–10)
+  # 6 = good fit, 8+ = strong/perfect fit
+  min_score: 6
+
+  # Max Telegram messages sent per run (caps noise on busy days)
+  max_alerts_per_run: 20
+
+  # Save a dated markdown digest in ./reports/
+  save_locally: true
+
+  # Roles/services that score higher — edit to match your crew & kit
+  target_roles:
+    - "Director of Photography"
+    - "Producer / Line Producer"
+    - "Camera Operator"
+    - "Gaffer / Lighting Technician"
+    - "Grip"
+    - "Production Company (subcontract)"
+    - "Branded Content"
+    - "Commercial Shoot"
+    - "Music Video"
+    - "Documentary"
+    - "Corporate Video"
+    - "Post-Production / Edit"
+
+  # Add your own RSS feeds here (optional)
+  # Any public RSS/Atom feed works — job boards, industry sites, etc.
+  # custom_rss_sources:
+  #   - name: "Mandy.com NYC"
+  #     market: "NYC"
+  #     url: "https://www.mandy.com/us/rss/jobs"
+  #   - name: "ProductionHub Jobs"
+  #     market: "NYC"
+  #     url: "https://www.productionhub.com/jobs/rss"
+  #   - name: "My Custom Source"
+  #     market: "Toronto"
+  #     url: "https://example.com/film-jobs.rss"
