@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Film Gig Hunter
-Monitors NYC & Toronto film industry job boards, scores listings with Claude,
-and sends Telegram alerts for relevant production opportunities.
-Run on a schedule (cron) to catch new gigs as they post.
+Film Gig Hunter — Personal edition (wrangler + producer)
+Scrapes Staff Me Up, Mandy.com, Craigslist, and Indeed for NYC + Toronto
+film industry gigs, scores with Claude, delivers via Telegram.
 """
 
 import os
 import json
-import sys
 import re
+import sys
 import time
 import hashlib
 import urllib.request
@@ -18,14 +17,26 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import requests
+from bs4 import BeautifulSoup
 import anthropic
 import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
 
-CACHE_FILE    = Path("gig_cache.json")
+CACHE_FILE     = Path("gig_cache.json")
 CACHE_TTL_DAYS = 30
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -69,181 +80,373 @@ def gig_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:16]
 
 
-def strip_html(text: str) -> str:
+def clean_text(text: str, max_len: int = 500) -> str:
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"&amp;",  "&",  text)
     text = re.sub(r"&lt;",   "<",  text)
     text = re.sub(r"&gt;",   ">",  text)
     text = re.sub(r"&quot;", '"',  text)
-    text = re.sub(r"&#\d+;", "",   text)
-    return " ".join(text.split())
+    text = re.sub(r"&#?\w+;", "",  text)
+    text = " ".join(text.split())
+    return text[:max_len]
+
+
+def make_gig(title: str, url: str, desc: str, source: str, market: str,
+             published: str = "") -> dict:
+    return {
+        "title":       title.strip(),
+        "url":         url.strip(),
+        "description": clean_text(desc),
+        "published":   published,
+        "source":      source,
+        "market":      market,
+    }
 
 
 # ─────────────────────────────────────────────────────────────
-# Sources
+# RSS fetcher (Indeed + Craigslist)
 # ─────────────────────────────────────────────────────────────
 
-def build_sources(config: dict) -> list[dict]:
-    markets = config.get("film_gigs", {}).get("markets", ["NYC", "Toronto"])
-    sources = []
-
-    if "NYC" in markets:
-        sources += [
-            {
-                "name":   "Indeed NYC — Film Production",
-                "market": "NYC",
-                "url":    "https://www.indeed.com/rss?q=film+production&l=New+York+City%2C+NY&sort=date&fromage=3",
-            },
-            {
-                "name":   "Indeed NYC — Video Crew",
-                "market": "NYC",
-                "url":    "https://www.indeed.com/rss?q=%22video+production%22+crew&l=New+York%2C+NY&sort=date&fromage=3",
-            },
-            {
-                "name":   "Indeed NYC — Camera Operator",
-                "market": "NYC",
-                "url":    "https://www.indeed.com/rss?q=camera+operator+freelance&l=New+York+City%2C+NY&sort=date&fromage=3",
-            },
-            {
-                "name":   "Indeed NYC — DP / Gaffer / PA",
-                "market": "NYC",
-                "url":    "https://www.indeed.com/rss?q=%22director+of+photography%22+OR+gaffer+OR+%22production+assistant%22+film&l=New+York%2C+NY&sort=date&fromage=3",
-            },
-            {
-                "name":   "Indeed NYC — Branded Content",
-                "market": "NYC",
-                "url":    "https://www.indeed.com/rss?q=%22branded+content%22+OR+%22commercial+production%22&l=New+York%2C+NY&sort=date&fromage=3",
-            },
-        ]
-
-    if "Toronto" in markets:
-        sources += [
-            {
-                "name":   "Indeed Toronto — Film Production",
-                "market": "Toronto",
-                "url":    "https://ca.indeed.com/rss?q=film+production&l=Toronto%2C+Ontario&sort=date&fromage=3",
-            },
-            {
-                "name":   "Indeed Toronto — Video Crew",
-                "market": "Toronto",
-                "url":    "https://ca.indeed.com/rss?q=%22video+production%22+crew&l=Toronto%2C+Ontario&sort=date&fromage=3",
-            },
-            {
-                "name":   "Indeed Toronto — Camera / Videographer",
-                "market": "Toronto",
-                "url":    "https://ca.indeed.com/rss?q=camera+operator+OR+videographer+freelance&l=Toronto%2C+Ontario&sort=date&fromage=3",
-            },
-            {
-                "name":   "Indeed Toronto — DP / Gaffer / PA",
-                "market": "Toronto",
-                "url":    "https://ca.indeed.com/rss?q=%22director+of+photography%22+OR+gaffer+OR+%22production+assistant%22+film&l=Toronto%2C+Ontario&sort=date&fromage=3",
-            },
-            {
-                "name":   "Indeed Toronto — Branded / Commercial",
-                "market": "Toronto",
-                "url":    "https://ca.indeed.com/rss?q=%22branded+content%22+OR+%22commercial+production%22&l=Toronto%2C+Ontario&sort=date&fromage=3",
-            },
-        ]
-
-    # User-defined custom RSS sources from config.yaml
-    for src in config.get("film_gigs", {}).get("custom_rss_sources", []):
-        sources.append(src)
-
-    return sources
-
-
-def fetch_rss(source: dict) -> list[dict]:
+def fetch_rss(url: str, source_name: str, market: str) -> list[dict]:
     gigs = []
     try:
-        req = urllib.request.Request(
-            source["url"],
-            headers={"User-Agent": "Mozilla/5.0 (compatible; FilmGigHunter/1.0)"},
-        )
+        req = urllib.request.Request(url, headers={"User-Agent": HEADERS["User-Agent"]})
         with urllib.request.urlopen(req, timeout=15) as resp:
             xml_data = resp.read()
-
         root    = ET.fromstring(xml_data)
         channel = root.find("channel")
         if channel is None:
             return []
-
         for item in channel.findall("item"):
             title = item.findtext("title", "").strip()
             link  = item.findtext("link",  "").strip()
-            desc  = strip_html(item.findtext("description", ""))
+            desc  = item.findtext("description", "")
             pub   = item.findtext("pubDate", "").strip()
-            if not title or not link:
-                continue
-            gigs.append({
-                "title":       title,
-                "url":         link,
-                "description": desc[:600],
-                "published":   pub,
-                "source":      source["name"],
-                "market":      source["market"],
-            })
+            if title and link:
+                gigs.append(make_gig(title, link, desc, source_name, market, pub))
     except Exception as e:
-        print(f"  ⚠  {source['name']}: {e}")
+        print(f"  ⚠  RSS [{source_name}]: {e}")
     return gigs
 
 
-def fetch_all_gigs(config: dict) -> list[dict]:
-    sources    = build_sources(config)
-    all_gigs   = []
-    seen_urls: set[str] = set()
+def fetch_indeed(markets: list[str]) -> list[dict]:
+    """Indeed RSS — catches corporate/staff postings."""
+    feeds = []
+    if "NYC" in markets:
+        base = "https://www.indeed.com/rss?sort=date&fromage=3&l=New+York+City%2C+NY&q="
+        feeds += [
+            (base + "wrangler+film",                  "Indeed NYC",     "NYC"),
+            (base + "producer+film+freelance",         "Indeed NYC",     "NYC"),
+            (base + "line+producer",                   "Indeed NYC",     "NYC"),
+            (base + "production+coordinator+film",     "Indeed NYC",     "NYC"),
+            (base + "%22branded+content%22+producer",  "Indeed NYC",     "NYC"),
+        ]
+    if "Toronto" in markets:
+        base = "https://ca.indeed.com/rss?sort=date&fromage=3&l=Toronto%2C+Ontario&q="
+        feeds += [
+            (base + "wrangler+film",                  "Indeed Toronto", "Toronto"),
+            (base + "producer+film+freelance",         "Indeed Toronto", "Toronto"),
+            (base + "line+producer",                   "Indeed Toronto", "Toronto"),
+            (base + "production+coordinator+film",     "Indeed Toronto", "Toronto"),
+        ]
 
-    for source in sources:
-        print(f"  Fetching {source['name']}...")
-        for gig in fetch_rss(source):
-            if gig["url"] not in seen_urls:
-                seen_urls.add(gig["url"])
-                all_gigs.append(gig)
-        time.sleep(0.8)
+    gigs = []
+    for url, name, market in feeds:
+        gigs += fetch_rss(url, name, market)
+        time.sleep(0.6)
+    return gigs
+
+
+def fetch_craigslist(markets: list[str]) -> list[dict]:
+    """Craigslist TV/Film jobs + creative gigs — high signal for freelance crew."""
+    feeds = []
+    if "NYC" in markets:
+        feeds += [
+            ("https://newyork.craigslist.org/search/tfr?format=rss", "Craigslist NYC Jobs", "NYC"),
+            ("https://newyork.craigslist.org/search/crg?format=rss", "Craigslist NYC Gigs", "NYC"),
+        ]
+    if "Toronto" in markets:
+        feeds += [
+            ("https://toronto.craigslist.org/search/tfr?format=rss",  "Craigslist Toronto Jobs", "Toronto"),
+            ("https://toronto.craigslist.org/search/crg?format=rss",  "Craigslist Toronto Gigs", "Toronto"),
+        ]
+
+    gigs = []
+    for url, name, market in feeds:
+        gigs += fetch_rss(url, name, market)
+        time.sleep(0.5)
+    return gigs
+
+
+# ─────────────────────────────────────────────────────────────
+# Staff Me Up scraper
+# ─────────────────────────────────────────────────────────────
+
+def scrape_staffmeup(markets: list[str]) -> list[dict]:
+    """
+    Staff Me Up — the primary North American film/TV job board.
+    Searches for wrangler, producer, and production coordinator roles.
+    """
+    role_queries = ["wrangler", "producer", "line producer", "production coordinator"]
+    location_map = {
+        "NYC":     "New York",
+        "Toronto": "Toronto",
+    }
+    gigs = []
+
+    for market in markets:
+        location = location_map.get(market, market)
+        for role in role_queries:
+            url = (
+                "https://www.staffmeup.com/jobs?"
+                + urllib.parse.urlencode({"q": role, "location": location})
+            )
+            try:
+                resp = requests.get(url, headers=HEADERS, timeout=15)
+                resp.raise_for_status()
+                soup = BeautifulSoup(resp.text, "html.parser")
+
+                # Staff Me Up job cards — try multiple selector patterns
+                cards = (
+                    soup.select(".job-card")
+                    or soup.select("[class*='job-card']")
+                    or soup.select("[class*='JobCard']")
+                    or soup.select("article")
+                )
+
+                for card in cards:
+                    a_tag = card.find("a", href=True)
+                    if not a_tag:
+                        continue
+                    title_el = (
+                        card.find(["h2", "h3", "h4"])
+                        or card.find(class_=re.compile(r"title", re.I))
+                    )
+                    desc_el  = card.find("p") or card.find(class_=re.compile(r"desc|summary", re.I))
+
+                    title = (title_el.get_text(strip=True) if title_el
+                             else a_tag.get_text(strip=True))
+                    if not title:
+                        continue
+
+                    href = a_tag["href"]
+                    if not href.startswith("http"):
+                        href = "https://www.staffmeup.com" + href
+
+                    desc = desc_el.get_text(strip=True) if desc_el else ""
+                    gigs.append(make_gig(title, href, desc, f"Staff Me Up {market}", market))
+
+                time.sleep(1.5)
+            except Exception as e:
+                print(f"  ⚠  Staff Me Up {market} [{role}]: {e}")
+
+    return gigs
+
+
+# ─────────────────────────────────────────────────────────────
+# Mandy.com scraper
+# ─────────────────────────────────────────────────────────────
+
+def scrape_mandy(markets: list[str]) -> list[dict]:
+    """
+    Mandy.com — major international film crew marketplace.
+    Covers both job listings and crew calls.
+    """
+    url_map = {
+        "NYC":     "https://www.mandy.com/us/film-jobs/",
+        "Toronto": "https://www.mandy.com/ca/film-jobs/",
+    }
+    gigs = []
+
+    for market in markets:
+        url = url_map.get(market)
+        if not url:
+            continue
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Mandy listing items — try common patterns
+            items = (
+                soup.select(".job-listing")
+                or soup.select("[class*='listing']")
+                or soup.select("[class*='job-item']")
+                or soup.select("li.result")
+                or soup.select(".result-item")
+            )
+
+            for item in items:
+                a_tag = item.find("a", href=True)
+                if not a_tag:
+                    continue
+                title_el = (
+                    item.find(["h2", "h3", "h4"])
+                    or item.find(class_=re.compile(r"title|heading", re.I))
+                )
+                desc_el  = item.find("p") or item.find(class_=re.compile(r"desc|summary|snippet", re.I))
+
+                title = (title_el.get_text(strip=True) if title_el
+                         else a_tag.get_text(strip=True))
+                if not title:
+                    continue
+
+                href = a_tag["href"]
+                if not href.startswith("http"):
+                    href = "https://www.mandy.com" + href
+
+                desc = desc_el.get_text(strip=True) if desc_el else ""
+                gigs.append(make_gig(title, href, desc, f"Mandy.com {market}", market))
+
+            time.sleep(1.2)
+        except Exception as e:
+            print(f"  ⚠  Mandy.com {market}: {e}")
+
+    return gigs
+
+
+# ─────────────────────────────────────────────────────────────
+# ProductionHub scraper
+# ─────────────────────────────────────────────────────────────
+
+def scrape_productionhub(markets: list[str]) -> list[dict]:
+    """ProductionHub — production industry job board with wrangler/producer listings."""
+    gigs = []
+    role_terms = ["wrangler", "producer", "production+coordinator"]
+
+    for market in markets:
+        loc = "new-york" if market == "NYC" else "toronto"
+        for term in role_terms:
+            url = f"https://www.productionhub.com/jobs?q={term}&location={loc}"
+            try:
+                resp = requests.get(url, headers=HEADERS, timeout=15)
+                resp.raise_for_status()
+                soup = BeautifulSoup(resp.text, "html.parser")
+
+                items = (
+                    soup.select(".job-listing")
+                    or soup.select("[class*='job-listing']")
+                    or soup.select(".listing-item")
+                    or soup.select("[class*='JobListing']")
+                )
+
+                for item in items:
+                    a_tag = item.find("a", href=True)
+                    if not a_tag:
+                        continue
+                    title_el = item.find(["h2", "h3", "h4"]) or a_tag
+                    desc_el  = item.find("p")
+
+                    title = title_el.get_text(strip=True)
+                    if not title:
+                        continue
+
+                    href = a_tag["href"]
+                    if not href.startswith("http"):
+                        href = "https://www.productionhub.com" + href
+
+                    desc = desc_el.get_text(strip=True) if desc_el else ""
+                    gigs.append(make_gig(title, href, desc, f"ProductionHub {market}", market))
+
+                time.sleep(1.2)
+            except Exception as e:
+                print(f"  ⚠  ProductionHub {market} [{term}]: {e}")
+
+    return gigs
+
+
+# ─────────────────────────────────────────────────────────────
+# Aggregate all sources
+# ─────────────────────────────────────────────────────────────
+
+def fetch_all_gigs(config: dict) -> list[dict]:
+    gig_cfg = config.get("film_gigs", {})
+    markets = gig_cfg.get("markets", ["NYC", "Toronto"])
+    sources = gig_cfg.get("sources", ["craigslist", "staffmeup", "mandy", "productionhub", "indeed"])
+
+    all_gigs:   list[dict]  = []
+    seen_urls:  set[str]    = set()
+
+    def add(fetched: list[dict]):
+        for g in fetched:
+            if g["url"] not in seen_urls:
+                seen_urls.add(g["url"])
+                all_gigs.append(g)
+
+    if "craigslist"   in sources:
+        print("  Fetching Craigslist (TV/Film jobs + creative gigs)...")
+        add(fetch_craigslist(markets))
+
+    if "staffmeup"    in sources:
+        print("  Fetching Staff Me Up...")
+        add(scrape_staffmeup(markets))
+
+    if "mandy"        in sources:
+        print("  Fetching Mandy.com...")
+        add(scrape_mandy(markets))
+
+    if "productionhub" in sources:
+        print("  Fetching ProductionHub...")
+        add(scrape_productionhub(markets))
+
+    if "indeed"       in sources:
+        print("  Fetching Indeed...")
+        add(fetch_indeed(markets))
+
+    # User-defined custom RSS sources
+    for src in gig_cfg.get("custom_rss_sources", []):
+        if src.get("market") in markets:
+            print(f"  Fetching {src['name']}...")
+            add(fetch_rss(src["url"], src["name"], src["market"]))
+            time.sleep(0.5)
 
     return all_gigs
 
 
 # ─────────────────────────────────────────────────────────────
-# Claude Scoring
+# Claude scoring — personal profile (wrangler + producer)
 # ─────────────────────────────────────────────────────────────
 
-SCORE_SYSTEM = """You are a booking coordinator for Ten Four Pictures, a boutique video
-production company (Toronto + NYC). You read incoming job postings and evaluate which ones
-represent genuine film/video production opportunities worth pursuing."""
+SCORE_SYSTEM = """You are reviewing film industry job listings on behalf of a freelance
+wrangler and producer based between NYC and Toronto. Your job is to identify which postings
+are genuinely worth applying to — direct fits, adjacent roles, and networking opportunities."""
 
 
 def score_batch(client: anthropic.Anthropic, batch: list[dict], config: dict) -> list[dict]:
-    gig_cfg    = config.get("film_gigs", {})
-    threshold  = gig_cfg.get("min_score", 6)
-    roles      = gig_cfg.get("target_roles", [])
-    roles_str  = (", ".join(roles) if roles
-                  else "DP, Director, Producer, Editor, Gaffer, PA, Camera Op")
+    profile   = config.get("film_gigs", {}).get("profile", {})
+    name      = profile.get("name", "Josh")
+    roles     = profile.get("roles", ["wrangler", "producer"])
+    notes     = profile.get("notes", "")
+    threshold = config.get("film_gigs", {}).get("min_score", 6)
 
+    roles_str = " and ".join(roles)
     gig_list = "\n\n".join([
         f"GIG {i+1}:\nTitle: {g['title']}\nMarket: {g['market']}\n"
         f"Source: {g['source']}\nDescription: {g['description'][:450]}"
         for i, g in enumerate(batch)
     ])
 
-    prompt = f"""Score each job posting for relevance to Ten Four Pictures.
+    prompt = f"""Score each job listing for relevance to {name}, a freelance film industry professional.
 
-Ten Four Pictures:
-- Boutique video production company, Toronto-based, also active in NYC
-- Services: branded content, commercials, music videos, documentaries, live events, post-production
-- Seeking: direct client shoots, freelance crew gigs, and production subcontracts
-- Key roles: {roles_str}
+{name}'s profile:
+- Primary roles: {roles_str}
+- Markets: NYC and Toronto
+{('- Notes: ' + notes) if notes else ''}
 
-Scoring scale (1–10):
-10 = Branded content/commercial shoot, music video, documentary production
-8–9 = Freelance crew call, video production project, short film with pay
-6–7 = Production assistant, BTS video, corporate video shoot
-4–5 = Photography-adjacent, large streaming/broadcast corporate staff role
-1–3 = Unrelated (retail, office, IT, restaurant, etc.)
+Scoring guide (1–10):
+10 = Direct role match — wrangler call, producer/line producer/production coordinator gig
+8–9 = Strong adjacent fit — 1st/2nd AD, set coordinator, production manager, PA on a real production
+6–7 = Possible fit — producing-adjacent, BTS producer, branded content shoot needing crew
+4–5 = Stretch — staff production role, post-production, photography-adjacent
+1–3 = Not relevant — retail, office, IT, unrelated industry
+
+Wrangler context: could mean animal wrangler, talent/extras wrangler, or child wrangler.
+Score any wrangler role high regardless of subtype.
 
 {gig_list}
 
 Respond ONLY with a valid JSON array — no markdown, no extra text:
-[{{"gig":1,"score":8,"summary":"One sentence describing what this gig is"}},...]"""
+[{{"gig":1,"score":8,"summary":"One sentence: what the gig is and why it fits"}},...]"""
 
     message = client.messages.create(
         model="claude-haiku-4-5-20251001",
@@ -275,15 +478,14 @@ def score_all(gigs: list[dict], config: dict) -> list[dict]:
         print("  ERROR: ANTHROPIC_API_KEY not set in .env")
         sys.exit(1)
 
-    client      = anthropic.Anthropic(api_key=api_key)
-    all_scored  = []
-    batch_size  = 5
+    client     = anthropic.Anthropic(api_key=api_key)
+    all_scored = []
+    batch_size = 5
 
     for i in range(0, len(gigs), batch_size):
         batch = gigs[i : i + batch_size]
         try:
-            scored = score_batch(client, batch, config)
-            all_scored.extend(scored)
+            all_scored.extend(score_batch(client, batch, config))
         except Exception as e:
             print(f"  ⚠  Scoring batch {i // batch_size + 1} failed: {e}")
         time.sleep(0.3)
@@ -317,26 +519,24 @@ def send_telegram(gigs: list[dict], markets: list[str]) -> bool:
 
     now    = datetime.now().strftime("%b %d · %H:%M")
     plural = "s" if len(gigs) != 1 else ""
-    header = (
+    _tg_post(token, chat_id, (
         f"🎬 <b>FILM GIG ALERT</b>  ·  {now}\n"
         f"📍 {' + '.join(markets)}  ·  {len(gigs)} new gig{plural}\n"
         f"{'─' * 32}"
-    )
-    _tg_post(token, chat_id, header)
+    ))
 
     for g in gigs:
-        dot     = "🟢" if g["score"] >= 8 else "🟡"
-        source  = g["source"].split("—")[0].strip()
-        msg = (
-            f"{dot} <b>{g['title']}</b>\n"
-            f"📌 {g['market']}  ·  {source}  ·  {g['score']}/10\n"
-            f"📝 {g['summary']}\n"
-            f'🔗 <a href="{g["url"]}">View posting</a>'
-        )
+        dot    = "🟢" if g["score"] >= 8 else "🟡"
+        source = g["source"].split(" — ")[0]
         try:
-            _tg_post(token, chat_id, msg)
+            _tg_post(token, chat_id, (
+                f"{dot} <b>{g['title']}</b>\n"
+                f"📌 {g['market']}  ·  {source}  ·  {g['score']}/10\n"
+                f"📝 {g['summary']}\n"
+                f'🔗 <a href="{g["url"]}">View posting</a>'
+            ))
         except Exception as e:
-            print(f"  ⚠  Telegram send failed for '{g['title']}': {e}")
+            print(f"  ⚠  Telegram: {e}")
         time.sleep(0.4)
 
     return True
@@ -351,9 +551,8 @@ def save_digest(gigs: list[dict]) -> str:
     reports_dir.mkdir(exist_ok=True)
     slug     = datetime.now().strftime("%Y-%m-%d-%H%M")
     filepath = reports_dir / f"gigs-{slug}.md"
-
-    lines = [
-        f"# Film Gig Digest  ·  {datetime.now().strftime('%B %d, %Y %H:%M')}\n\n",
+    lines    = [
+        f"# Film Gig Digest  ·  {datetime.now().strftime('%B %d, %Y  %H:%M')}\n\n",
         f"**{len(gigs)} relevant gig{'s' if len(gigs) != 1 else ''}**\n\n",
     ]
     for g in gigs:
@@ -365,7 +564,6 @@ def save_digest(gigs: list[dict]) -> str:
         if g.get("published"):
             lines.append(f"- **Posted:** {g['published']}\n")
         lines.append("\n")
-
     with open(filepath, "w") as f:
         f.writelines(lines)
     return str(filepath)
@@ -381,29 +579,29 @@ def main():
     markets    = gig_cfg.get("markets", ["NYC", "Toronto"])
     threshold  = gig_cfg.get("min_score", 6)
     max_alerts = gig_cfg.get("max_alerts_per_run", 20)
+    profile    = gig_cfg.get("profile", {})
+    name       = profile.get("name", "Josh")
+    roles      = profile.get("roles", ["wrangler", "producer"])
 
     print("\n" + hr("═"))
     print(f"  FILM GIG HUNTER  ·  {datetime.now().strftime('%A, %B %d, %Y  %H:%M')}")
+    print(f"  Profile: {name}  ·  {' + '.join(roles)}")
     print(f"  Markets: {', '.join(markets)}  ·  Min score: {threshold}/10")
     print(hr("═") + "\n")
 
-    # ── Cache ──────────────────────────────────────────────────
     cache = prune_cache(load_cache())
 
-    # ── Fetch ──────────────────────────────────────────────────
     print(hr())
     print("  FETCHING LISTINGS")
     print(hr())
     all_gigs = fetch_all_gigs(config)
     print(f"\n  Total fetched:  {len(all_gigs)}")
 
-    # Filter out already-seen gigs
-    new_pairs: list[tuple[str, dict]] = []
-    for g in all_gigs:
-        gid = gig_id(g["url"])
-        if gid not in cache.get("seen", {}):
-            new_pairs.append((gid, g))
-
+    new_pairs: list[tuple[str, dict]] = [
+        (gig_id(g["url"]), g)
+        for g in all_gigs
+        if gig_id(g["url"]) not in cache.get("seen", {})
+    ]
     print(f"  New (unseen):   {len(new_pairs)}")
 
     if not new_pairs:
@@ -412,7 +610,6 @@ def main():
         print(f"\n{hr('═')}\n")
         return
 
-    # Mark all new as seen before scoring (prevents re-processing on partial failure)
     now_iso = datetime.now().isoformat()
     for gid, _ in new_pairs:
         cache.setdefault("seen", {})[gid] = now_iso
@@ -420,7 +617,6 @@ def main():
 
     gigs_to_score = [g for _, g in new_pairs]
 
-    # ── Score ──────────────────────────────────────────────────
     print(f"\n{hr()}")
     print("  SCORING WITH CLAUDE")
     print(hr())
@@ -435,7 +631,6 @@ def main():
 
     top = scored[:max_alerts]
 
-    # ── Print ──────────────────────────────────────────────────
     print(f"\n{hr()}")
     print(f"  TOP GIGS  ({len(top)} shown)")
     print(hr())
@@ -446,7 +641,6 @@ def main():
         print(f"       {g['summary']}")
         print(f"       {g['url']}")
 
-    # ── Telegram ───────────────────────────────────────────────
     token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     print()
@@ -457,7 +651,6 @@ def main():
     else:
         print("  Telegram →  not configured (add TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to .env)")
 
-    # ── Save digest ────────────────────────────────────────────
     if gig_cfg.get("save_locally", True):
         path = save_digest(top)
         print(f"  Saved    →  {path}")

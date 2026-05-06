@@ -87,45 +87,41 @@ report:
 film_gigs:
   enabled: true
 
-  # Markets to monitor — remove either to disable that region
+  # ── Your profile ─────────────────────────────────────────────
+  # Claude uses this to score gigs specifically for you
+  profile:
+    name: "Josh"
+    roles:
+      - "wrangler"      # animal, talent/extras, or child wrangler
+      - "producer"      # line producer, assoc. producer, production coordinator
+    notes: >
+      Based between NYC and Toronto. Open to day-player and multi-day gigs.
+      Also experienced with branded content and short-form production.
+
+  # ── Markets ───────────────────────────────────────────────────
   markets:
     - "NYC"
     - "Toronto"
 
+  # ── Scoring ───────────────────────────────────────────────────
   # Only alert on gigs scoring this or higher (1–10)
-  # 6 = good fit, 8+ = strong/perfect fit
+  # 8+ = direct role match, 6–7 = adjacent/worth checking
   min_score: 6
-
-  # Max Telegram messages sent per run (caps noise on busy days)
   max_alerts_per_run: 20
-
-  # Save a dated markdown digest in ./reports/
   save_locally: true
 
-  # Roles/services that score higher — edit to match your crew & kit
-  target_roles:
-    - "Director of Photography"
-    - "Producer / Line Producer"
-    - "Camera Operator"
-    - "Gaffer / Lighting Technician"
-    - "Grip"
-    - "Production Company (subcontract)"
-    - "Branded Content"
-    - "Commercial Shoot"
-    - "Music Video"
-    - "Documentary"
-    - "Corporate Video"
-    - "Post-Production / Edit"
+  # ── Sources to enable ─────────────────────────────────────────
+  # Comment out any you want to skip
+  sources:
+    - craigslist      # TV/Film jobs + creative gigs (RSS — most reliable)
+    - staffmeup       # Staff Me Up — primary North American film/TV job board
+    - mandy           # Mandy.com — international crew marketplace
+    - productionhub   # ProductionHub — production industry jobs
+    - indeed          # Indeed — catches staff/corporate postings
 
-  # Add your own RSS feeds here (optional)
-  # Any public RSS/Atom feed works — job boards, industry sites, etc.
+  # ── Custom RSS sources (optional) ────────────────────────────
+  # Any public RSS/Atom feed works
   # custom_rss_sources:
-  #   - name: "Mandy.com NYC"
+  #   - name: "My Source"
   #     market: "NYC"
-  #     url: "https://www.mandy.com/us/rss/jobs"
-  #   - name: "ProductionHub Jobs"
-  #     market: "NYC"
-  #     url: "https://www.productionhub.com/jobs/rss"
-  #   - name: "My Custom Source"
-  #     market: "Toronto"
-  #     url: "https://example.com/film-jobs.rss"
+  #     url: "https://example.com/jobs.rss"
